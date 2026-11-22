@@ -14,7 +14,7 @@ if [ -z "${NO_COLOR:-}" ]; then
   if [ -t 1 ]; then ok=$(printf '\033[32m✓\033[0m'); fi
   if [ -t 2 ]; then err=$(printf '\033[31merror:\033[0m'); fi
 fi
-fail() { echo "mddog install: $err $*" >&2; exit 1; }
+fail() { printf 'mddog install: %s %s\n' "$err" "$*" >&2; exit 1; }
 
 # Show ~ for a folder under the user's home.
 case $dir in
@@ -78,7 +78,7 @@ version=$(./mdd --version) || fail "the release cannot run on this system (Linux
 mkdir -p -- "$dir"
 mv -f -- mdd "$dir/mdd"
 if [ "$os" = Darwin ]; then xattr -d com.apple.quarantine "$dir/mdd" 2>/dev/null || true; fi
-echo "$ok Installed $version to $show/mdd"
+printf '%s\n' "$ok Installed $version to $show/mdd"
 
 # Shell-quote a path instead of putting arbitrary folder names into startup commands.
 quote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
@@ -100,9 +100,9 @@ case ":$PATH:" in
         ;;
       *) add="export PATH=$quoted_dir:\"\$PATH\"" ;;
     esac
-    echo "$show is not on your PATH. To add it, run:"
+    printf '%s\n' "$show is not on your PATH. To add it, run:"
     echo
-    echo "    $add"
+    printf '%s\n' "    $add"
     echo
     ;;
 esac

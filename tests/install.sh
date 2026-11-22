@@ -84,6 +84,8 @@ MOCK
 chmod +x "$root/bin/uname" "$root/bin/sysctl" "$root/bin/xattr" "$root/bin/mktemp" "$root/bin/tar" "$root/bin/curl" "$root/bin/sha256sum" "$root/bin/shasum"
 
 fail() { printf 'installer test: %s\n' "$*" >&2; exit 1; }
+# The shell that runs install.sh, so the checks can run it under dash as CI does.
+sh_bin=${MDDOG_TEST_SHELL:-/bin/sh}
 contains() { case $1 in *"$2"*) ;; *) fail "missing $2" ;; esac; }
 absent() { case $1 in *"$2"*) fail "unexpected $2" ;; esac; }
 no_temp() {
@@ -99,7 +101,7 @@ run() {
   unset MDDOG_RELEASE_URL MDDOG_INSTALL_DIR
   if [ -n "$7" ]; then export MDDOG_RELEASE_URL=$7; fi
   if [ -n "$8" ]; then export MDDOG_INSTALL_DIR=$8; fi
-  if PATH="$root/bin" /bin/sh "$repo/install.sh" > "$root/$name.out" 2>&1; then status=0; else status=$?; fi
+  if PATH="$root/bin" "$sh_bin" "$repo/install.sh" > "$root/$name.out" 2>&1; then status=0; else status=$?; fi
   output=$(PATH="$real_path" sed -n '1,200p' "$root/$name.out")
   log=$(PATH="$real_path" sed -n '1,200p' "$MDDOG_TEST_LOG")
   no_temp
@@ -116,7 +118,7 @@ contains "$output" '~/.bashrc'
 # The startup hint is executable shell syntax even when the home path contains spaces.
 hint=$(PATH="$real_path" sed -n 's/^    \(printf .*\)$/\1/p' "$root/linux-x86.out")
 [ -n "$hint" ] || fail 'no bash PATH hint'
-/bin/sh -c "$hint"
+"$sh_bin" -c "$hint" || fail "the startup hint does not run: $hint"
 contains "$(sed -n '1,5p' "$HOME/.bashrc")" "$HOME/.local/bin"
 
 run linux-arm Linux aarch64 0 '' /bin/fish https://offline.invalid/download/ "$root/custom bin"
