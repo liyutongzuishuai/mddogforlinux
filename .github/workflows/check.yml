@@ -4,6 +4,7 @@ on:
   push:
     paths-ignore: [website/**]
   pull_request:
+  workflow_dispatch:
 
 concurrency:
   group: check-${{ github.ref }}
