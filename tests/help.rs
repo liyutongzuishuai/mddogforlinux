@@ -1,5 +1,6 @@
 #![allow(clippy::unwrap_used, reason = "a failed step should fail the test")]
 
+use base64::Engine as _;
 use std::io::{Read, Write};
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
@@ -99,13 +100,20 @@ fn start_replying(exe: &std::path::Path, args: &[&str], dir: Option<&std::path::
 /// Serializes `openpty` calls: macOS `openpty` uses `ptsname`'s process-global static buffer and is not thread-safe.
 static OPENPTY: Mutex<()> = Mutex::new(());
 
-fn start_sized(exe: &std::path::Path, args: &[&str], dir: Option<&std::path::Path>, mut size: libc::winsize, reply: Vec<u8>, env: &[(&str, &str)], job: bool) -> Viewer {
+fn start_sized(exe: &std::path::Path, args: &[&str], dir: Option<&std::path::Path>, size: libc::winsize, reply: Vec<u8>, env: &[(&str, &str)], job: bool) -> Viewer {
     let slot = Slot::take();
     let (mut master, mut slave) = (0, 0);
     {
         let _guard = OPENPTY.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // macOS takes the window size as an out-pointer; Linux only reads it through a const pointer.
+        #[cfg(target_os = "macos")]
+        let mut window = size;
+        #[cfg(target_os = "macos")]
+        let window: *mut libc::winsize = &mut window;
+        #[cfg(not(target_os = "macos"))]
+        let window: *const libc::winsize = &size;
         // SAFETY: each pointer is a valid out-pointer or null, which openpty allows for the name and termios.
-        assert_eq!(unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), &mut size) }, 0);
+        assert_eq!(unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), window) }, 0);
     }
     // SAFETY: openpty returned a new fd that nothing else owns.
     let slave = unsafe { OwnedFd::from_raw_fd(slave) };
@@ -127,7 +135,10 @@ fn start_sized(exe: &std::path::Path, args: &[&str], dir: Option<&std::path::Pat
     unsafe {
         cmd.pre_exec(move || {
             libc::setsid();
+            #[cfg(target_os = "macos")]
             libc::ioctl(0, libc::TIOCSCTTY.into(), 0);
+            #[cfg(not(target_os = "macos"))]
+            libc::ioctl(0, libc::TIOCSCTTY, 0);
             if job {
                 run_as_job();
             }
@@ -534,9 +545,10 @@ fn a_rex_placeholder_size_at_launch_is_no_font_zoom() {
     let Viewer { mut child, tty, out } = start_sized(env!("CARGO_BIN_EXE_mdd").as_ref(), &[GFM], None, size, probe_reply((8, 16)), &env, false);
     wait_trace(&trace, "terminal probed");
     resize(&tty, libc::winsize { ws_row: 40, ws_col: 100, ws_xpixel: 100 * 18, ws_ypixel: 40 * 38 });
-    wait_trace(&trace, "mark resize");
+    // The startup scale correction lays out again as it reads the new size, so no "resize" mark is owed.
+    wait_trace(&trace, "width 900 px");
     wait_for(&out, 0, b"a=p,");
-    let shown = page_after(&trace, "mark resize");
+    let shown = page_after(&trace, "terminal probed");
     let _ = child.kill();
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(shown, (2.0, 900.0), "the first real size was taken as a font zoom");
@@ -749,8 +761,10 @@ fn a_resize_clears_the_old_status_row() {
 
 /// A copy of the binary with its own defaults domain, named after it, so a test can set the macOS
 /// appearance that copy sees without changing the system's.
+#[cfg(target_os = "macos")]
 struct Appearance(std::path::PathBuf);
 
+#[cfg(target_os = "macos")]
 impl Appearance {
     fn new(dir: &std::path::Path) -> Self {
         let exe = dir.join(format!("mddog-appearance-{}", std::process::id()));
@@ -770,6 +784,7 @@ impl Appearance {
     }
 }
 
+#[cfg(target_os = "macos")]
 impl Drop for Appearance {
     fn drop(&mut self) {
         let _ = Command::new("defaults").args(["delete", self.domain()]).status();
@@ -777,6 +792,7 @@ impl Drop for Appearance {
     }
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn help_follows_an_appearance_change() {
     let dir = scratch("appearance");
@@ -896,6 +912,9 @@ fn deleting_the_selected_file_takes_its_preview_down() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The mark exists where a guessed scale is corrected. On Linux the scale comes from environment hints
+/// before the engine exists, so there is no guess to correct; `term::screen` tests that ordering.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_list_at_startup_takes_the_real_display_scale() {
     let dir = scratch("listscale");
@@ -1097,26 +1116,25 @@ fn tiles_line_up_at_an_odd_cell_height() {
 /// A click names a terminal cell, which lands on a Retina page point only at scale 2; a CI runner's screen is 1x.
 const RETINA: (&str, &str) = ("MDDOG_SCALE", "2");
 
-/// Sends `mouse` with `copy_on_select` set to `on`, and waits for a copy when `copies` says one should come. Returns
-/// the text of each OSC 52 copy the viewer wrote, and what it sent to a stand-in pbcopy.
+/// The text of each OSC 52 copy and the input to a private stand-in clipboard command.
 fn mouse_copies(on: bool, mouse: &[u8], copies: bool) -> (Vec<String>, String) {
     let dir = scratch(&format!("select-{on}-{}", mouse.len()));
     std::fs::write(dir.join("mddog/config.toml"), format!("copy_on_select = {on}\n")).unwrap();
     let bin = dir.join("bin");
     std::fs::create_dir(&bin).unwrap();
-    std::fs::write(bin.join("pbcopy"), format!("#!/bin/sh\ncat >> '{}'\n", dir.join("clip").display())).unwrap();
-    std::fs::set_permissions(bin.join("pbcopy"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let clipboard = if cfg!(target_os = "macos") { "pbcopy" } else { "wl-copy" };
+    std::fs::write(bin.join(clipboard), "#!/bin/sh\ncat >> \"$MDDOG_TEST_CLIPBOARD\"\n").unwrap();
+    std::fs::set_permissions(bin.join(clipboard), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
     let file = dir.join("a.md");
     std::fs::write(&file, "alpha beta gamma\n\ndelta epsilon zeta\n").unwrap();
-    let env = [("XDG_CONFIG_HOME", dir.to_str().unwrap()), ("PATH", &path), RETINA];
+    let clip = dir.join("clip");
+    let env = [("XDG_CONFIG_HOME", dir.to_str().unwrap()), ("PATH", &path), ("MDDOG_TEST_CLIPBOARD", clip.to_str().unwrap()), ("WAYLAND_DISPLAY", "mddog-test-wayland"), ("DISPLAY", ""), RETINA];
     let Viewer { mut child, mut tty, out } = open(file.to_str().unwrap(), 80, &env);
     wait_for(&out, 0, b"a=p,");
     let before = out.lock().unwrap().len();
     tty.write_all(mouse).unwrap();
-    let clip = dir.join("clip");
-    // A copy writes OSC 52 and starts pbcopy on a thread, and a quit can come before pbcopy has run, so this waits
-    // on both. With no copy coming, the wait is a fixed window for a wrong one to show up in.
+    // Wait for OSC 52 and the asynchronous clipboard command, so quitting cannot race the copy.
     let end = Instant::now() + if copies { LIMIT } else { Duration::from_millis(800) };
     while !(find(&out.lock().unwrap()[before..], b"\x1b]52;c;").is_some() && std::fs::metadata(&clip).is_ok_and(|m| m.len() > 0)) && Instant::now() < end {
         std::thread::sleep(Duration::from_millis(20));
@@ -1132,9 +1150,7 @@ fn mouse_copies(on: bool, mouse: &[u8], copies: bool) -> (Vec<String>, String) {
         .skip(1)
         .map(|s| {
             let b64 = s.split('\x1b').next().unwrap();
-            let mut dec = Command::new("base64").arg("-D").stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
-            dec.stdin.take().unwrap().write_all(b64.as_bytes()).unwrap();
-            String::from_utf8(dec.wait_with_output().unwrap().stdout).unwrap()
+            String::from_utf8(base64::engine::general_purpose::STANDARD.decode(b64).unwrap()).unwrap()
         })
         .collect();
     (copies, clip)
@@ -1405,46 +1421,99 @@ fn a_link_to_the_page_itself_jumps_without_reloading() {
     assert_eq!(quit, Some(true));
 }
 
-#[test]
-fn a_relative_link_opens_the_file_at_its_heading_and_backspace_returns() {
-    let dir = scratch("locallink");
-    let trace = dir.join("trace.log");
+/// Clicks column 20 down the page until `needle` shows, so a test does not depend on how the
+/// installed font wraps a link over rows.
+fn click_until_shows(tty: &mut std::fs::File, out: &Mutex<Vec<u8>>, from: usize, needle: &[u8]) -> bool {
+    for row in 1..=22u16 {
+        let click = format!("\x1b[<0;4;{row}M\x1b[<0;4;{row}m");
+        tty.write_all(click.as_bytes()).unwrap();
+        let end = Instant::now() + Duration::from_millis(400);
+        while Instant::now() < end {
+            if find(&out.lock().unwrap()[from..], needle).is_some() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    false
+}
+
+fn linked_page(name: &str, label: &str, target: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let dir = scratch(name);
     std::fs::create_dir_all(dir.join(".git")).unwrap();
     std::fs::create_dir_all(dir.join("docs")).unwrap();
-    let words = "link text ".repeat(30);
-    std::fs::write(dir.join("a.md"), format!("[{words}](docs/b.md#deep)\n\n[{words}](nope.md)\n\n[{words}](setup.command)\n\n[{words}](docs/)\n")).unwrap();
-    std::fs::write(dir.join("docs/ReadMe.md"), "# Docs home\n").unwrap();
-    std::fs::write(dir.join("setup.command"), "#!/bin/sh\n").unwrap();
+    std::fs::write(dir.join("a.md"), format!("[{label}]({target})\n")).unwrap();
+    let trace = dir.join("trace.log");
+    (dir, trace)
+}
+
+#[test]
+fn a_relative_link_opens_the_file_at_its_heading_and_backspace_returns() {
+    let (dir, trace) = linked_page("locallink", "link text", "docs/b.md#deep");
     std::fs::write(dir.join("docs/b.md"), format!("# Top\n\n{f}## Deep\n\n{f}", f = "filler\n\n".repeat(200))).unwrap();
     let a = dir.join("a.md");
     let env = [("MDDOG_TRACE", trace.to_str().unwrap()), ("XDG_CONFIG_HOME", dir.to_str().unwrap()), RETINA];
     let Viewer { mut child, mut tty, out } = open(a.to_str().unwrap(), 80, &env);
     let shown = wait_for(&out, 0, b"a=p,");
-    tty.write_all(b"\x1b[<0;20;3M\x1b[<0;20;3m").unwrap();
-    let opened = wait_for(&out, shown, b" b.md ");
+    assert!(click_until_shows(&mut tty, &out, shown, b" b.md "), "a click did not open b.md");
     wait_count(&trace, "page loaded", 2);
     let landed = top_after(&trace, "page loaded");
     std::thread::sleep(Duration::from_millis(500));
     tty.write_all(b"\x7f").unwrap();
-    let back = wait_for(&out, opened, b" a.md ");
-    std::thread::sleep(Duration::from_millis(500));
-    // The second link, below the first, names no file.
-    tty.write_all(b"\x1b[<0;20;8M\x1b[<0;20;8m").unwrap();
-    let missing = wait_for(&out, back, b"Can't open nope.md: no such file");
-    std::thread::sleep(Duration::from_millis(500));
-    // The third link names a script, which must not run.
-    tty.write_all(b"\x1b[<0;20;13M\x1b[<0;20;13m").unwrap();
-    let refused = wait_for(&out, missing, b"Not a .md or .markdown file: setup.command");
-    std::thread::sleep(Duration::from_millis(500));
-    // The fourth link names a folder, which opens its README.
-    tty.write_all(b"\x1b[<0;20;18M\x1b[<0;20;18m").unwrap();
-    wait_for(&out, refused, b" ReadMe.md ");
+    wait_for(&out, shown, b" a.md ");
     tty.write_all(b"q").unwrap();
     let quit = exits_within(&mut child, LIMIT);
     let _ = child.kill();
     let _ = std::fs::remove_dir_all(&dir);
     assert!(landed.starts_with("\"Deep"), "b.md opened at {landed}, not at its heading");
     assert_eq!(quit, Some(true));
+}
+
+#[test]
+fn a_relative_link_to_a_missing_file_says_so() {
+    let (dir, trace) = linked_page("linkmissing", "link text", "nope.md");
+    let a = dir.join("a.md");
+    let env = [("MDDOG_TRACE", trace.to_str().unwrap()), ("XDG_CONFIG_HOME", dir.to_str().unwrap()), RETINA];
+    let Viewer { mut child, mut tty, out } = open(a.to_str().unwrap(), 80, &env);
+    let shown = wait_for(&out, 0, b"a=p,");
+    let found = click_until_shows(&mut tty, &out, shown, b"Can't open nope.md: no such file");
+    tty.write_all(b"q").unwrap();
+    let _ = exits_within(&mut child, LIMIT);
+    let _ = child.kill();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(found, "the missing-file notice never showed");
+}
+
+#[test]
+fn a_relative_link_to_a_script_is_refused() {
+    let (dir, trace) = linked_page("linkscript", "link text", "setup.command");
+    std::fs::write(dir.join("setup.command"), "#!/bin/sh\n").unwrap();
+    let a = dir.join("a.md");
+    let env = [("MDDOG_TRACE", trace.to_str().unwrap()), ("XDG_CONFIG_HOME", dir.to_str().unwrap()), RETINA];
+    let Viewer { mut child, mut tty, out } = open(a.to_str().unwrap(), 80, &env);
+    let shown = wait_for(&out, 0, b"a=p,");
+    let found = click_until_shows(&mut tty, &out, shown, b"Not a .md or .markdown file: setup.command");
+    tty.write_all(b"q").unwrap();
+    let _ = exits_within(&mut child, LIMIT);
+    let _ = child.kill();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(found, "a link to a script was not refused");
+}
+
+#[test]
+fn a_relative_link_to_a_folder_opens_its_readme() {
+    let (dir, trace) = linked_page("linkfolder", "link text", "docs/");
+    std::fs::write(dir.join("docs/ReadMe.md"), "# Docs home\n").unwrap();
+    let a = dir.join("a.md");
+    let env = [("MDDOG_TRACE", trace.to_str().unwrap()), ("XDG_CONFIG_HOME", dir.to_str().unwrap()), RETINA];
+    let Viewer { mut child, mut tty, out } = open(a.to_str().unwrap(), 80, &env);
+    let shown = wait_for(&out, 0, b"a=p,");
+    let found = click_until_shows(&mut tty, &out, shown, b" ReadMe.md ");
+    tty.write_all(b"q").unwrap();
+    let _ = exits_within(&mut child, LIMIT);
+    let _ = child.kill();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(found, "a folder link did not open its README");
 }
 
 fn extensions_config(dir: &std::path::Path) -> std::path::PathBuf {

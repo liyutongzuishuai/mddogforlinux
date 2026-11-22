@@ -9,38 +9,68 @@ fn fontdb() -> Arc<usvg::fontdb::Database> {
     static DB: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
     DB.get_or_init(|| {
         let mut db = usvg::fontdb::Database::new();
-        for f in [
-            "/System/Library/Fonts/SFNS.ttf",
-            "/System/Library/Fonts/Helvetica.ttc",
-            "/System/Library/Fonts/Supplemental/Arial.ttf",
-            "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
-            "/System/Library/Fonts/Menlo.ttc",
-        ] {
-            if let Ok(d) = std::fs::read(f) {
-                db.load_font_data(d);
+        #[cfg(target_os = "macos")]
+        {
+            for f in [
+                "/System/Library/Fonts/SFNS.ttf",
+                "/System/Library/Fonts/Helvetica.ttc",
+                "/System/Library/Fonts/Supplemental/Arial.ttf",
+                "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+                "/System/Library/Fonts/Menlo.ttc",
+            ] {
+                if let Ok(d) = std::fs::read(f) {
+                    db.load_font_data(d);
+                }
             }
+            db.set_sans_serif_family("Helvetica");
+            db.set_serif_family("Helvetica");
+            db.set_monospace_family("Menlo");
         }
-        db.set_sans_serif_family("Helvetica");
-        db.set_serif_family("Helvetica");
-        db.set_monospace_family("Menlo");
+        #[cfg(target_os = "linux")]
+        {
+            use cosmic_text::fontdb::{Family, Source};
+            let fonts = crate::render::text::database();
+            let mut paths = std::collections::HashSet::new();
+            for face in fonts.faces() {
+                match &face.source {
+                    Source::File(path) | Source::SharedFile(path, _) if paths.insert(path) => {
+                        let _ = db.load_font_file(path);
+                    }
+                    Source::Binary(data) => db.load_font_data(data.as_ref().as_ref().to_vec()),
+                    _ => {}
+                }
+            }
+            db.set_sans_serif_family(fonts.family_name(&Family::SansSerif));
+            db.set_serif_family(fonts.family_name(&Family::Serif));
+            db.set_monospace_family(fonts.family_name(&Family::Monospace));
+        }
         Arc::new(db)
     })
     .clone()
 }
 
 /// The SF family's name in `fontdb`: macOS's system font file calls itself this.
+#[cfg(target_os = "macos")]
 pub const SYSTEM_FONT: &str = "System Font";
+/// Linux's generic family, resolved from the installed font database.
+#[cfg(target_os = "linux")]
+pub const SYSTEM_FONT: &str = "sans-serif";
 
-/// A theme's font list for SVG text: CSS's names for the system font become SF's family, which `fontdb` knows,
-/// so diagram labels draw in SF, not in the Helvetica fallback.
-/// The names after the system font never draw, so they are left out.
+/// A theme's font list for SVG text, with generic system names resolved on each platform.
 pub fn svg_families(fonts: &[String]) -> String {
     let mut out = Vec::new();
     for f in fonts {
         match f.to_ascii_lowercase().as_str() {
-            // CoreText knows SF Pro by name, but `fontdb` only by the system font file's own name.
             n if crate::render::text::system_ui(n) || matches!(n, "sf pro" | "sf pro text" | "sf pro display") => {
                 out.push(SYSTEM_FONT.to_string());
+                break;
+            }
+            "ui-monospace" | "monospace" => {
+                out.push("monospace".into());
+                break;
+            }
+            "ui-serif" | "serif" => {
+                out.push("serif".into());
                 break;
             }
             _ => out.push(f.clone()),
@@ -50,7 +80,9 @@ pub fn svg_families(fonts: &[String]) -> String {
 }
 
 pub fn svg_tree(data: &[u8]) -> Option<usvg::Tree> {
-    let o = usvg::Options { fontdb: fontdb(), font_family: "Helvetica".into(), ..usvg::Options::default() };
+    let db = fontdb();
+    let family = db.family_name(&usvg::fontdb::Family::SansSerif).to_string();
+    let o = usvg::Options { fontdb: db, font_family: family, ..usvg::Options::default() };
     usvg::Tree::from_data(data, &o).ok()
 }
 
@@ -117,12 +149,16 @@ mod tests {
     }
 
     #[test]
-    fn the_system_font_names_reach_sf() {
+    fn generic_names_reach_installed_svg_fonts() {
         let fonts = ["system-ui", "-apple-system", "Avenir Next"].map(String::from);
-        assert_eq!(super::svg_families(&fonts), "System Font");
+        assert_eq!(super::svg_families(&fonts), super::SYSTEM_FONT);
         let fonts = ["Avenir Next", "ui-sans-serif", "Inter"].map(String::from);
-        assert_eq!(super::svg_families(&fonts), "Avenir Next, System Font");
-        // SF is in the font set under that name, so a label in it doesn't fall back to Helvetica.
-        assert!(super::fontdb().faces().any(|f| f.families.iter().any(|(n, _)| n == super::SYSTEM_FONT)));
+        assert_eq!(super::svg_families(&fonts), format!("Avenir Next, {}", super::SYSTEM_FONT));
+        let db = super::fontdb();
+        #[cfg(target_os = "macos")]
+        let family = super::SYSTEM_FONT;
+        #[cfg(target_os = "linux")]
+        let family = db.family_name(&super::usvg::fontdb::Family::SansSerif);
+        assert!(db.faces().any(|f| f.families.iter().any(|(n, _)| n == family)));
     }
 }

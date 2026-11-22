@@ -3,7 +3,8 @@
 # Every value here is the default, so you only need the keys you change.
 # An unknown key or a bad value stops mddog with an error that names the key.
 
-# One theme, such as "github-dark", or one for each macOS appearance as below.
+# One theme, such as "github-dark", or one for each light and dark system appearance as below.
+# mddog follows macOS's appearance, and on Linux the GTK_THEME and COLORFGBG hints it starts with.
 # A theme is a built-in name (github-light, github-dark, obsidian-light, obsidian-dark)
 # or a path to a theme file (any value that ends in .css or contains /). "light:obsidian-light,dark:obsidian-dark" looks like Obsidian.
 # A theme file sets colors, fonts, sizes, weights and a layout (github or obsidian) as tokens. A relative path starts from the config folder,

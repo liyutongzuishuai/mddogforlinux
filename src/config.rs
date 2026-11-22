@@ -178,7 +178,7 @@ pub enum Callouts {
     Obsidian,
 }
 
-/// The `theme` key: one theme, or one for each macOS appearance.
+/// The `theme` key: one theme, or one for each system appearance.
 #[derive(Deserialize, Debug, Clone, PartialEq)]
 #[serde(try_from = "String")]
 pub enum ThemeSpec {
@@ -249,7 +249,7 @@ impl ThemeSpec {
     }
 }
 
-/// The themes in use: `dark` is set when the theme follows the macOS appearance.
+/// The themes in use: `dark` is set when the theme follows the system appearance.
 #[derive(Debug, PartialEq)]
 pub struct Themes {
     pub light: &'static Theme,
@@ -383,7 +383,7 @@ pub enum Choice {
 impl Choice {
     pub fn label(&self) -> &str {
         match self {
-            Choice::Follow { .. } => "Follow macOS",
+            Choice::Follow { .. } => "Follow system",
             Choice::Theme { value, .. } => value,
         }
     }
@@ -488,7 +488,7 @@ pub fn save(choice: &Choice) -> Result<String, String> {
         replace(&path, &text, &new).map_err(|e| format!("Can't write {}: {}", tilde(&path), crate::term::io_error(&e)))?;
     }
     Ok(match choice {
-        Choice::Follow { .. } => format!("Saved: follow the macOS appearance, in {}", tilde(&path)),
+        Choice::Follow { .. } => format!("Saved: follow the system appearance, in {}", tilde(&path)),
         Choice::Theme { .. } => format!("Saved {value} as the theme in {}", tilde(&path)),
     })
 }
@@ -560,13 +560,13 @@ fn tilde(path: &Path) -> String {
     }
 }
 
-/// Whether text is drawn with font smoothing, from macOS's `AppleFontSmoothing` at startup: 0 turns it off, and
-/// unset or 1 to 3 leave it on. CoreGraphics bitmap contexts ignore the setting, so mddog reads it itself.
+/// Whether the rasterizer smooths text. macOS honors AppleFontSmoothing; Linux enables smoothing.
 pub fn font_smoothing() -> bool {
     static SYSTEM: OnceLock<bool> = OnceLock::new();
     *SYSTEM.get_or_init(system_smoothing)
 }
 
+#[cfg(target_os = "macos")]
 fn system_smoothing() -> bool {
     use objc2_foundation::{NSString, NSUserDefaults};
     let d = NSUserDefaults::standardUserDefaults();
@@ -574,15 +574,76 @@ fn system_smoothing() -> bool {
     d.objectForKey(&key).is_none() || d.integerForKey(&key) != 0
 }
 
+#[cfg(not(target_os = "macos"))]
+fn system_smoothing() -> bool {
+    true
+}
+
+#[cfg(target_os = "macos")]
 fn system_dark() -> bool {
     use objc2_foundation::{NSString, NSUserDefaults};
     let style = NSUserDefaults::standardUserDefaults().stringForKey(&NSString::from_str("AppleInterfaceStyle"));
     style.is_some_and(|s| s.to_string().eq_ignore_ascii_case("dark"))
 }
 
+/// Linux follows inherited hints, not live Wayland/X11 desktop preferences: a nonempty GTK_THEME
+/// takes precedence, then COLORFGBG's ANSI background, else light. No desktop command runs during layout.
+#[cfg(any(test, not(target_os = "macos")))]
+fn dark_from_hints(gtk_theme: Option<&str>, colorfgbg: Option<&str>) -> bool {
+    if let Some(theme) = gtk_theme.map(str::trim).filter(|s| !s.is_empty()) {
+        let theme = theme.to_ascii_lowercase();
+        if let Some((_, variant)) = theme.rsplit_once(':') {
+            match variant.trim() {
+                "dark" => return true,
+                "light" => return false,
+                _ => {}
+            }
+        }
+        return theme.split([':', '-', '_', ' ']).any(|part| part == "dark");
+    }
+    colorfgbg.and_then(|s| s.rsplit(';').next()).and_then(|s| s.trim().parse::<u8>().ok()).filter(|&bg| bg <= 15).is_some_and(|bg| bg < 7 || bg == 8)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn system_dark() -> bool {
+    let gtk_theme = std::env::var("GTK_THEME").ok();
+    let colorfgbg = std::env::var("COLORFGBG").ok();
+    dark_from_hints(gtk_theme.as_deref(), colorfgbg.as_deref())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn linux_theme_hints_prefer_gtk_and_fall_back_to_light() {
+        assert!(dark_from_hints(Some("Adwaita:dark"), Some("0;15")));
+        assert!(dark_from_hints(Some("  Adwaita-Dark  "), None));
+        assert!(dark_from_hints(Some("Breeze_DARK"), None));
+        assert!(!dark_from_hints(Some("Adwaita:light"), Some("15;0")));
+        assert!(!dark_from_hints(Some("Adwaita-Dark:light"), None));
+        assert!(!dark_from_hints(Some("Adwaita"), Some("15;0")));
+        assert!(!dark_from_hints(Some("Notdark"), None));
+        assert!(dark_from_hints(Some(" "), Some("15;0")));
+        assert!(dark_from_hints(None, Some("15;default;8")));
+        assert!(!dark_from_hints(None, Some("0;7")));
+        assert!(!dark_from_hints(None, Some("0;15")));
+        for value in [None, Some(""), Some("15;"), Some("15;256"), Some("15;-1"), Some("dark")] {
+            assert!(!dark_from_hints(None, value), "{value:?}");
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn linux_font_smoothing_is_enabled() {
+        assert!(system_smoothing());
+    }
+
+    #[test]
+    fn following_theme_labels_are_platform_neutral() {
+        let choice = Choice::Follow { value: "light:github-light,dark:github-dark".into(), light: theme::builtin("github-light").unwrap(), dark: theme::builtin("github-dark").unwrap() };
+        assert_eq!(choice.label(), "Follow system");
+    }
 
     fn parse(text: &str) -> Result<Config, String> {
         super::parse(text, Path::new("/nonexistent"))
@@ -748,12 +809,9 @@ mod tests {
         assert_eq!(std::fs::read_to_string(dir.join("real/later.toml")).unwrap(), "made");
         assert!(replace(&dir.join("config.toml"), "stale", "lost").is_err());
         std::fs::set_permissions(dir.join("real/config.toml"), std::os::unix::fs::PermissionsExt::from_mode(0o640)).unwrap();
-        assert!(std::process::Command::new("xattr").args(["-w", "mddog.test", "kept"]).arg(dir.join("real/config.toml")).status().unwrap().success());
         replace(&dir.join("config.toml"), "new", "newer").unwrap();
         let mode = std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(dir.join("real/config.toml")).unwrap().permissions());
         assert_eq!(mode & 0o777, 0o640);
-        let out = std::process::Command::new("xattr").args(["-p", "mddog.test"]).arg(dir.join("real/config.toml")).output().unwrap();
-        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "kept");
         let decoy = dir.join("decoy");
         std::fs::write(&decoy, "keep").unwrap();
         let nonce = crate::tmp::nonce();
@@ -763,6 +821,21 @@ mod tests {
         std::fs::remove_file(dir.join(format!("real/.config.toml.{nonce}"))).unwrap();
         assert_eq!(std::fs::read_to_string(dir.join("real/config.toml")).unwrap(), "newer");
         assert_eq!(std::fs::read_dir(dir.join("real")).unwrap().count(), 2);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn replace_preserves_macos_extended_attributes() {
+        let dir = std::env::temp_dir().join(format!("mddog-replace-xattr-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "old").unwrap();
+        assert!(std::process::Command::new("xattr").args(["-w", "mddog.test", "kept"]).arg(&path).status().unwrap().success());
+        replace(&path, "old", "new").unwrap();
+        let out = std::process::Command::new("xattr").args(["-p", "mddog.test"]).arg(&path).output().unwrap();
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "kept");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

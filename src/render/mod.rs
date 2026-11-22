@@ -1,4 +1,4 @@
-//! The renderer: Markdown to a display list, drawn with CoreText and CoreGraphics.
+//! The renderer: Markdown to a display list and platform-native RGBA tiles.
 
 pub mod doc;
 pub mod engine;

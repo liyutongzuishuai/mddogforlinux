@@ -3,13 +3,28 @@ name: release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  release:
-    runs-on: macos-latest
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            platform: macos
+            targets: aarch64-apple-darwin x86_64-apple-darwin
+          - os: ubuntu-24.04
+            platform: linux
+            targets: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            platform: linux
+            targets: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
@@ -25,32 +40,91 @@ jobs:
             echo "::error::tag $tag, Cargo.toml $cargo, plugin.json $plugin: set all three to the same version"
             exit 1
           fi
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Install Linux test fonts
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y fonts-dejavu-core fonts-liberation fonts-noto-core fonts-stix
+      - name: Check the installer without network access
+        run: sh tests/install.sh
       - name: Install Claude Code for the plugin checks
         run: |
           curl -fsSL https://claude.ai/install.sh | bash -s "$(cat plugins/claude-code/claude-code-version)"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Run the gate before publishing
         run: ./check.sh
-      - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
-      - run: cargo build --release --locked --target aarch64-apple-darwin --target x86_64-apple-darwin
-      - name: Package one tarball per architecture
+      - run: rustup target add ${{ matrix.targets }}
+      - name: Build the platform targets
+        env:
+          TARGETS: ${{ matrix.targets }}
         run: |
-          for arch in arm64 x86_64; do
-            case $arch in arm64) target=aarch64-apple-darwin ;; x86_64) target=x86_64-apple-darwin ;; esac
-            cp "target/$target/release/mdd" mdd
-            codesign --force --sign - mdd
-            tar czf "mdd-macos-$arch.tar.gz" mdd
-            shasum -a 256 "mdd-macos-$arch.tar.gz" > "mdd-macos-$arch.tar.gz.sha256"
+          set -euo pipefail
+          for target in $TARGETS; do cargo build --release --locked --target "$target"; done
+      - name: Package one tarball per architecture
+        env:
+          TARGETS: ${{ matrix.targets }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for target in $TARGETS; do
+            case $target in
+              aarch64-apple-darwin) arch=arm64 ;;
+              x86_64-apple-darwin|x86_64-unknown-linux-gnu) arch=x86_64 ;;
+              aarch64-unknown-linux-gnu) arch=aarch64 ;;
+              *) echo "::error::unsupported target $target"; exit 1 ;;
+            esac
+            cp "target/$target/release/mdd" dist/mdd
+            if [ "$PLATFORM" = macos ]; then codesign --force --sign - dist/mdd; fi
+            asset="mdd-$PLATFORM-$arch.tar.gz"
+            tar czf "dist/$asset" -C dist mdd
+            if command -v sha256sum >/dev/null 2>&1; then
+              (cd dist && sha256sum "$asset" > "$asset.sha256")
+            else
+              (cd dist && shasum -a 256 "$asset" > "$asset.sha256")
+            fi
+          done
+      - name: Upload the platform packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: mdd-${{ matrix.os }}
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
+      - name: Download every platform package
+        uses: actions/download-artifact@v4
+        with:
+          pattern: mdd-*
+          path: dist
+          merge-multiple: true
+      - name: Verify the complete release set
+        run: |
+          set -euo pipefail
+          cd dist
+          for asset in mdd-macos-arm64 mdd-macos-x86_64 mdd-linux-x86_64 mdd-linux-aarch64; do
+            test -f "$asset.tar.gz" && test -f "$asset.tar.gz.sha256"
+            shasum -a 256 -c "$asset.tar.gz.sha256"
           done
       - name: Write the release notes
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          prev=$(git describe --tags --abbrev=0 "$GITHUB_REF_NAME^")
-          # GitHub's generated notes list only merged pull requests, and most changes go straight to main.
+          prev=$(git describe --tags --abbrev=0 "$GITHUB_REF_NAME^" 2>/dev/null || true)
+          range=$GITHUB_REF_NAME
+          if [ -n "$prev" ]; then range="$prev..$GITHUB_REF_NAME"; fi
+          # Include direct commits as well as merged pull requests.
           {
-            git log --no-merges --format='%H %s' "$prev..$GITHUB_REF_NAME" | while read -r sha subject; do
+            git log --no-merges --format='%H %s' "$range" | while read -r sha subject; do
               case $subject in "chore: release "*) continue ;; esac
               # Credit outside contributors by their GitHub login, as GitHub's generated notes did.
               login=$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha" --jq '.author.login // empty' || true)
@@ -59,20 +133,30 @@ jobs:
               echo "- $subject (${sha:0:7})$by"
             done
             echo
-            echo "**Full Changelog**: https://github.com/$GITHUB_REPOSITORY/compare/$prev...$GITHUB_REF_NAME"
+            echo 'Linux assets target glibc 2.39 or newer (Ubuntu 24.04), on x86_64 or aarch64. Install system fonts; see docs/linux.md.'
+            echo
+            if [ -n "$prev" ]; then
+              echo "**Full Changelog**: https://github.com/$GITHUB_REPOSITORY/compare/$prev...$GITHUB_REF_NAME"
+            else
+              echo "**Commits**: https://github.com/$GITHUB_REPOSITORY/commits/$GITHUB_REF_NAME"
+            fi
           } > notes.md
-      - run: gh release create "$GITHUB_REF_NAME" mdd-macos-*.tar.gz mdd-macos-*.tar.gz.sha256 --notes-file notes.md
+      - run: gh release create "$GITHUB_REF_NAME" dist/mdd-*.tar.gz dist/mdd-*.tar.gz.sha256 --notes-file notes.md
         env:
           GH_TOKEN: ${{ github.token }}
-      - name: Point the Homebrew formula at this release
+      - name: Point the upstream Homebrew formula at this release
         env:
           TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
           set -euo pipefail
+          if [ "$GITHUB_REPOSITORY" != qu8n/mddog ] || [ -z "$TAP_TOKEN" ]; then
+            echo 'Homebrew tap update skipped: only the upstream repository with a tap token publishes the formula.'
+            exit 0
+          fi
           git clone --depth 1 "https://x-access-token:$TAP_TOKEN@github.com/qu8n/homebrew-tap.git" tap
           f=tap/Formula/mddog.rb
           for arch in arm64 x86_64; do
-            sum=$(cut -d' ' -f1 "mdd-macos-$arch.tar.gz.sha256")
+            sum=$(cut -d' ' -f1 "dist/mdd-macos-$arch.tar.gz.sha256")
             # The sha256 line sits right under its url line.
             sed -i '' -E -e "s|/download/v[^/]+/mdd-macos-$arch|/download/$GITHUB_REF_NAME/mdd-macos-$arch|" \
               -e "/mdd-macos-$arch\.tar\.gz\"/{n;s/sha256 \"[0-9a-f]{64}\"/sha256 \"$sum\"/;}" "$f"

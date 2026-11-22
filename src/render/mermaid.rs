@@ -118,9 +118,12 @@ fn svg(src: &str, th: &Theme) -> Option<String> {
     layout.pie.height = 296.0;
     let opts = RenderOptions { theme: mt, layout };
     let svg = mermaid_rs_renderer::render_with_options(src, opts).ok()?;
-    // CoreText tightens SF at 16 px by 0.31 px a letter from the font's tracking table, which resvg doesn't read.
-    let font = crate::render::svg::SYSTEM_FONT;
-    let svg = svg.replace(&format!(r#"font-family="{font}""#), &format!(r#"font-family="{font}" letter-spacing="-0.31""#));
+    #[cfg(target_os = "macos")]
+    let svg = {
+        // SF's tracking table tightens 16 px text by 0.31 px per letter; resvg doesn't read that table.
+        let font = crate::render::svg::SYSTEM_FONT;
+        svg.replace(&format!(r#"font-family="{font}""#), &format!(r#"font-family="{font}" letter-spacing="-0.31""#))
+    };
     // Gantt grid lines come in a fixed light slate, which glares on a dark page.
     let svg = if kind == DiagramKind::Gantt { svg.replace(r##"stroke="#E2E8F0""##, &format!(r#"stroke="{}""#, hex(th.border))) } else { svg };
     // The renderer keeps the quotes around an ER relationship's label, which mermaid's syntax uses only to allow spaces.

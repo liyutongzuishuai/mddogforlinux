@@ -138,9 +138,9 @@ impl Probe {
         self.version.starts_with("iTerm2")
     }
 
-    /// Ghostty shows kitty image pixels as Display P3 but cell colors as sRGB, unless `window-colorspace = display-p3`.
+    /// macOS Ghostty shows kitty image pixels as Display P3 but cell colors as sRGB, unless `window-colorspace = display-p3`.
     pub fn ghostty(&self) -> bool {
-        self.version.starts_with("ghostty")
+        cfg!(target_os = "macos") && self.version.starts_with("ghostty")
     }
 
     /// Rex, which answers `XTVERSION` as `rex 0.1.0-preview.20`.
@@ -909,7 +909,7 @@ mod tests {
         assert!(!p.ghostty(), "herdr's libghostty doesn't say which terminal shows its images");
         // Ghostty 1.3.2's own answer.
         let (p, _) = parse_probe(b"\x1bP>|ghostty 1.3.2-main-+22391ed64\x1b\\\x1b[?62;22;52c");
-        assert!(p.ghostty());
+        assert_eq!(p.ghostty(), cfg!(target_os = "macos"));
         let (p, _) = parse_probe(b"\x1b[6;38t\x1b[?62;22c");
         assert_eq!(p.cell, None);
         assert_eq!(p.version, "");

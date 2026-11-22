@@ -19,6 +19,8 @@
       systems = [
         "aarch64-darwin"
         "x86_64-darwin"
+        "x86_64-linux"
+        "aarch64-linux"
       ];
 
       mkPkgs =
@@ -34,6 +36,8 @@
       forAllSystems = f: lib.genAttrs systems (system: f (mkPkgs system) system);
 
       cargoToml = fromTOML (builtins.readFile ./Cargo.toml);
+      linuxFonts = pkgs: with pkgs; [ dejavu_fonts liberation_ttf noto-fonts stix-two ];
+      fontConfig = pkgs: pkgs.makeFontsConf { fontDirectories = linuxFonts pkgs; };
     in
     {
       packages = forAllSystems (
@@ -48,13 +52,17 @@
               lockFile = ./Cargo.lock;
             };
 
-            checkFlags = [
+            nativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.makeWrapper ];
+
+            # fontdb reads this file in Rust; no native Fontconfig library is required.
+            FONTCONFIG_FILE = if pkgs.stdenv.hostPlatform.isLinux then fontConfig pkgs else null;
+            postInstall = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+              wrapProgram $out/bin/mdd --set-default FONTCONFIG_FILE ${fontConfig pkgs}
+            '';
+
+            checkFlags = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
               # Requires macOS /usr/bin/defaults (unavailable in the Nix sandbox).
               "--skip=help_follows_an_appearance_change"
-              # Invokes macOS BSD `base64 -D`, whereas Nix's stdenv provides GNU `base64`.
-              "--skip=cmd_c_copies_the_selection"
-              "--skip=copy_on_select_copies_a_double_clicked_word"
-              "--skip=copy_on_select_copies_a_drag"
             ];
 
             meta = {
@@ -79,7 +87,8 @@
               clippy
               rustc
               rustfmt
-            ];
+            ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux (linuxFonts pkgs);
+            FONTCONFIG_FILE = if pkgs.stdenv.hostPlatform.isLinux then fontConfig pkgs else null;
           };
         }
       );

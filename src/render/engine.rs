@@ -1,4 +1,4 @@
-//! The engine: lays out and draws the page with CoreText and CoreGraphics, and answers the viewer's
+//! The engine: lays out and draws the page, and answers the viewer's
 //! calls (search, selection, hit tests, wide-block scrolling) from the laid-out `Page`.
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};

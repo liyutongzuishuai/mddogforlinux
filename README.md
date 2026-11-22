@@ -6,7 +6,7 @@
 <p align="center">
   <a href="https://github.com/qu8n/mddog/releases/latest"><img src="https://img.shields.io/github/v/release/qu8n/mddog" alt="Latest release"/></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/qu8n/mddog" alt="License"/></a>
-  <img src="https://img.shields.io/badge/platform-macOS-lightgrey?logo=apple" alt="Platform: macOS"/>
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey" alt="Platforms: macOS and Linux"/>
   <img src="https://img.shields.io/badge/built%20with-Rust-orange?logo=rust" alt="Built with Rust"/>
 </p>
 
@@ -33,22 +33,25 @@ Other terminal viewers render Markdown with only characters. Code editors render
 
 ## Requirements
 
-- macOS
-- A terminal that supports the [kitty graphics protocol](https://sw.kovidgoyal.net/kitty/graphics-protocol/): Ghostty, iTerm2, kitty, WezTerm, or Rex
+- macOS, or Linux with glibc 2.39 or newer
+- A terminal that supports the [kitty graphics protocol](https://sw.kovidgoyal.net/kitty/graphics-protocol/): Ghostty, kitty, WezTerm, or Rex. On macOS, iTerm2 also works.
+- On Linux, an installed text font and a math font: `fonts-dejavu-core`, `fonts-liberation` or `fonts-noto-core`, and `fonts-stix` on Debian and Ubuntu; `dejavu-sans-fonts`, `liberation-sans-fonts`, `google-noto-sans-fonts` and `stix-fonts` on Fedora
 
 ## Install
+
+On macOS with Homebrew:
 
 ```sh
 brew install qu8n/tap/mddog
 ```
 
-Or, without Homebrew:
+Or, on macOS and Linux, without Homebrew:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/qu8n/mddog/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/liyutongzuishuai/mddogforlinux/main/install.sh | sh
 ```
 
-For Nix, building from source, updating, and uninstalling, see [Install](https://mddog.pages.dev/docs#install) in the docs.
+For Nix, building from source, updating, and uninstalling, see [Install](https://mddog.pages.dev/docs#install) in the docs, and [docs/linux.md](docs/linux.md) for what differs on Linux.
 
 ## Usage
 
