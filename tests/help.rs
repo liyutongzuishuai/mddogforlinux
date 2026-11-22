@@ -1421,46 +1421,99 @@ fn a_link_to_the_page_itself_jumps_without_reloading() {
     assert_eq!(quit, Some(true));
 }
 
-#[test]
-fn a_relative_link_opens_the_file_at_its_heading_and_backspace_returns() {
-    let dir = scratch("locallink");
-    let trace = dir.join("trace.log");
+/// Clicks column 20 down the page until `needle` shows, so a test does not depend on how the
+/// installed font wraps a link over rows.
+fn click_until_shows(tty: &mut std::fs::File, out: &Mutex<Vec<u8>>, from: usize, needle: &[u8]) -> bool {
+    for row in 1..=22u16 {
+        let click = format!("\x1b[<0;4;{row}M\x1b[<0;4;{row}m");
+        tty.write_all(click.as_bytes()).unwrap();
+        let end = Instant::now() + Duration::from_millis(400);
+        while Instant::now() < end {
+            if find(&out.lock().unwrap()[from..], needle).is_some() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    false
+}
+
+fn linked_page(name: &str, label: &str, target: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let dir = scratch(name);
     std::fs::create_dir_all(dir.join(".git")).unwrap();
     std::fs::create_dir_all(dir.join("docs")).unwrap();
-    let words = "link text ".repeat(30);
-    std::fs::write(dir.join("a.md"), format!("[{words}](docs/b.md#deep)\n\n[{words}](nope.md)\n\n[{words}](setup.command)\n\n[{words}](docs/)\n")).unwrap();
-    std::fs::write(dir.join("docs/ReadMe.md"), "# Docs home\n").unwrap();
-    std::fs::write(dir.join("setup.command"), "#!/bin/sh\n").unwrap();
+    std::fs::write(dir.join("a.md"), format!("[{label}]({target})\n")).unwrap();
+    let trace = dir.join("trace.log");
+    (dir, trace)
+}
+
+#[test]
+fn a_relative_link_opens_the_file_at_its_heading_and_backspace_returns() {
+    let (dir, trace) = linked_page("locallink", "link text", "docs/b.md#deep");
     std::fs::write(dir.join("docs/b.md"), format!("# Top\n\n{f}## Deep\n\n{f}", f = "filler\n\n".repeat(200))).unwrap();
     let a = dir.join("a.md");
     let env = [("MDDOG_TRACE", trace.to_str().unwrap()), ("XDG_CONFIG_HOME", dir.to_str().unwrap()), RETINA];
     let Viewer { mut child, mut tty, out } = open(a.to_str().unwrap(), 80, &env);
     let shown = wait_for(&out, 0, b"a=p,");
-    tty.write_all(b"\x1b[<0;20;3M\x1b[<0;20;3m").unwrap();
-    let opened = wait_for(&out, shown, b" b.md ");
+    assert!(click_until_shows(&mut tty, &out, shown, b" b.md "), "a click did not open b.md");
     wait_count(&trace, "page loaded", 2);
     let landed = top_after(&trace, "page loaded");
     std::thread::sleep(Duration::from_millis(500));
     tty.write_all(b"\x7f").unwrap();
-    let back = wait_for(&out, opened, b" a.md ");
-    std::thread::sleep(Duration::from_millis(500));
-    // The second link, below the first, names no file.
-    tty.write_all(b"\x1b[<0;20;8M\x1b[<0;20;8m").unwrap();
-    let missing = wait_for(&out, back, b"Can't open nope.md: no such file");
-    std::thread::sleep(Duration::from_millis(500));
-    // The third link names a script, which must not run.
-    tty.write_all(b"\x1b[<0;20;13M\x1b[<0;20;13m").unwrap();
-    let refused = wait_for(&out, missing, b"Not a .md or .markdown file: setup.command");
-    std::thread::sleep(Duration::from_millis(500));
-    // The fourth link names a folder, which opens its README.
-    tty.write_all(b"\x1b[<0;20;18M\x1b[<0;20;18m").unwrap();
-    wait_for(&out, refused, b" ReadMe.md ");
+    wait_for(&out, shown, b" a.md ");
     tty.write_all(b"q").unwrap();
     let quit = exits_within(&mut child, LIMIT);
     let _ = child.kill();
     let _ = std::fs::remove_dir_all(&dir);
     assert!(landed.starts_with("\"Deep"), "b.md opened at {landed}, not at its heading");
     assert_eq!(quit, Some(true));
+}
+
+#[test]
+fn a_relative_link_to_a_missing_file_says_so() {
+    let (dir, trace) = linked_page("linkmissing", "link text", "nope.md");
+    let a = dir.join("a.md");
+    let env = [("MDDOG_TRACE", trace.to_str().unwrap()), ("XDG_CONFIG_HOME", dir.to_str().unwrap()), RETINA];
+    let Viewer { mut child, mut tty, out } = open(a.to_str().unwrap(), 80, &env);
+    let shown = wait_for(&out, 0, b"a=p,");
+    let found = click_until_shows(&mut tty, &out, shown, b"Can't open nope.md: no such file");
+    tty.write_all(b"q").unwrap();
+    let _ = exits_within(&mut child, LIMIT);
+    let _ = child.kill();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(found, "the missing-file notice never showed");
+}
+
+#[test]
+fn a_relative_link_to_a_script_is_refused() {
+    let (dir, trace) = linked_page("linkscript", "link text", "setup.command");
+    std::fs::write(dir.join("setup.command"), "#!/bin/sh\n").unwrap();
+    let a = dir.join("a.md");
+    let env = [("MDDOG_TRACE", trace.to_str().unwrap()), ("XDG_CONFIG_HOME", dir.to_str().unwrap()), RETINA];
+    let Viewer { mut child, mut tty, out } = open(a.to_str().unwrap(), 80, &env);
+    let shown = wait_for(&out, 0, b"a=p,");
+    let found = click_until_shows(&mut tty, &out, shown, b"Not a .md or .markdown file: setup.command");
+    tty.write_all(b"q").unwrap();
+    let _ = exits_within(&mut child, LIMIT);
+    let _ = child.kill();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(found, "a link to a script was not refused");
+}
+
+#[test]
+fn a_relative_link_to_a_folder_opens_its_readme() {
+    let (dir, trace) = linked_page("linkfolder", "link text", "docs/");
+    std::fs::write(dir.join("docs/ReadMe.md"), "# Docs home\n").unwrap();
+    let a = dir.join("a.md");
+    let env = [("MDDOG_TRACE", trace.to_str().unwrap()), ("XDG_CONFIG_HOME", dir.to_str().unwrap()), RETINA];
+    let Viewer { mut child, mut tty, out } = open(a.to_str().unwrap(), 80, &env);
+    let shown = wait_for(&out, 0, b"a=p,");
+    let found = click_until_shows(&mut tty, &out, shown, b" ReadMe.md ");
+    tty.write_all(b"q").unwrap();
+    let _ = exits_within(&mut child, LIMIT);
+    let _ = child.kill();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(found, "a folder link did not open its README");
 }
 
 fn extensions_config(dir: &std::path::Path) -> std::path::PathBuf {
