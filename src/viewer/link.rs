@@ -79,15 +79,39 @@ fn decode(s: &str) -> String {
     crate::render::media::percent_decode(s).unwrap_or_else(|| s.to_string())
 }
 
+fn open_command(url: &str) -> Option<Command> {
+    if url.chars().any(char::is_control) || !matches!(Link::of(url), Some(Link::Open(_))) {
+        return None;
+    }
+    let program = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+    let mut command = Command::new(program);
+    command.arg(url).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    Some(command)
+}
+
 pub fn open(url: String) {
+    let Some(mut command) = open_command(&url) else { return };
     std::thread::spawn(move || {
-        let _ = Command::new("open").arg(url).stdout(Stdio::null()).stderr(Stdio::null()).status();
+        let _ = command.status();
     });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn desktop_open_accepts_only_web_and_mail_links_as_one_argument() {
+        let program = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+        for url in ["https://example.com/?x=a%20b&y=$(touch%20nope)", "HTTP://example.com", "mailto:a@example.com?subject=hello%20world"] {
+            let command = open_command(url).unwrap();
+            assert_eq!(command.get_program(), program);
+            assert_eq!(command.get_args().collect::<Vec<_>>(), [std::ffi::OsStr::new(url)]);
+        }
+        for url in ["file:///bin/sh", "./file.md", "#anchor", "javascript:alert(1)", "data:text/plain,hi", "-anything", "https://example.com/\nnext", "https://example.com/\0"] {
+            assert!(open_command(url).is_none(), "{url:?}");
+        }
+    }
 
     #[test]
     fn web_mail_anchor_and_local_links_are_followed() {

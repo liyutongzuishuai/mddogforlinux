@@ -25,7 +25,7 @@ flowchart LR
   D --> F["headless: PNG or WebP files"]
 ```
 
-mddog is one Rust binary, `mdd`, for macOS only. It uses CoreText to lay out text and CoreGraphics to draw. It has no library users. It runs in three modes:
+mddog is one Rust binary, `mdd`, for macOS and Linux. macOS lays out text with CoreText and draws with CoreGraphics; Linux shapes text with cosmic-text, rasterizes glyphs with Swash, and draws with tiny-skia. It has no library users. It runs in three modes:
 
 | Mode | Started by | What it does |
 |---|---|---|
@@ -51,7 +51,7 @@ The command line. It parses the options, checks the file before it takes the ter
 
 **Architecture invariant:** `theme.rs` holds the only SGR color formatters. Every part drawn in cells gets its colors through `Palette`.
 
-**Architecture invariant:** there is no appearance observer. `config::theme()` reads the macOS light or dark setting each time a page is built, and a change shows on the next reload.
+**Architecture invariant:** there is no appearance observer. `config::theme()` reads the system's light or dark setting each time a page is built, and a change shows on the next reload. On Linux that setting is the `GTK_THEME` and `COLORFGBG` hints the process started with, so it changes only with a restart.
 
 ### `src/render/`
 
@@ -63,9 +63,9 @@ The renderer. It turns Markdown into pixels and knows nothing about terminals. I
 - `mermaid`: Mermaid source to a bitmap, through mermaid-rs-renderer and resvg. No browser and no script.
 - `images`, `media`, `remote`: local and remote images. `media` decides which local files a page may show. `remote` fetches web images.
 - `svg`: SVG parsing and drawing, for SVG images, diagrams, and icons. `icons`: the alert and button icons.
-- `text`: fonts, text measuring, and text drawing through CoreText.
+- `text`: fonts, text measuring, and text drawing. `text/macos.rs` uses CoreText, and `text/linux.rs` uses cosmic-text and Swash. Both hold `Fonts`, behind one `FontKey` and one measure and draw interface.
 - `layout` and `page`: a `Doc` to a `Page`. A `Page` is a display list of rects, text runs, images, and paths, plus what the viewer asks about: links, anchors, headings, buttons, wide blocks, and the page's text.
-- `raster`: draws the part of the display list that touches a tile, then the overlay on top.
+- `raster`: draws the part of the display list that touches a tile, then the overlay on top. `raster/macos.rs` uses CoreGraphics, and `raster/linux.rs` uses tiny-skia; both fill the caller's premultiplied RGBA buffer.
 - `theme`: flattens a `theme::Theme` into the fields that layout reads, and picks the `Look` (GitHub or Obsidian) where the two looks draw a part differently.
 - `engine`: `Engine`, the one object that the viewer and headless mode call.
 
@@ -150,7 +150,7 @@ The file list's preview (`viewer/preview.rs`) is the one exception to "only the 
 
 Headless mode has the same rule: the engine and every snapshot stay on its main thread. Besides the engine's own workers, it has a signal thread, the file watcher, and threads that encode the image files.
 
-The viewer has no helper process, no socket, and no daemon. The only programs it runs are `$EDITOR` (through `sh -c`), `pbcopy`, and `open` for web and mail links.
+The viewer has no helper process, no socket, and no daemon. The only programs it runs are `$EDITOR` (through `sh -c`), the clipboard helper (`pbcopy` on macOS; `wl-copy`, `xclip`, or `xsel` on Linux), and `open` or `xdg-open` for web and mail links.
 
 ### Coordinates and scale
 
@@ -162,7 +162,7 @@ Each top-level block keeps the source lines it came from. Before the page is lai
 
 ### Caches
 
-All caches are in memory and last for one process, except the remote image cache. Highlights are kept by their source text, so a reload with unchanged code doesn't highlight it again. Mermaid diagrams are kept until the next load, so a resize or a `<details>` toggle doesn't build them again. Fonts and laid-out text lines are kept by `render::text::Fonts`. Remote images are kept in memory and on disk under `~/Library/Caches/mddog/remote/`. `MDDOG_CACHE_DIR` moves that root.
+All caches are in memory and last for one process, except the remote image cache. Highlights are kept by their source text, so a reload with unchanged code doesn't highlight it again. Mermaid diagrams are kept until the next load, so a resize or a `<details>` toggle doesn't build them again. Fonts and laid-out text lines are kept by `render::text::Fonts`. Remote images are kept in memory and on disk under `~/Library/Caches/mddog/remote/` on macOS, and under `$XDG_CACHE_HOME/mddog/remote/` (else `~/.cache/mddog/remote/`) on Linux. `MDDOG_CACHE_DIR` moves that root.
 
 ### Files on disk
 

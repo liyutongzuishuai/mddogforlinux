@@ -110,7 +110,11 @@ fn system_lookup(host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
 
 fn agent_with(lookup: Lookup, allow: Allow) -> ureq::Agent {
     use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
-    let tls = TlsConfig::builder().provider(TlsProvider::NativeTls).root_certs(RootCerts::PlatformVerifier).build();
+    #[cfg(target_os = "macos")]
+    let provider = TlsProvider::NativeTls;
+    #[cfg(target_os = "linux")]
+    let provider = TlsProvider::Rustls;
+    let tls = TlsConfig::builder().provider(provider).root_certs(RootCerts::PlatformVerifier).build();
     let config = ureq::Agent::config_builder()
         // A proxy would be resolved instead of the image host.
         .proxy(None)
@@ -250,13 +254,28 @@ fn disk_dir() -> PathBuf {
     cache_dir().join("remote")
 }
 
-/// The cache root: `MDDOG_CACHE_DIR` when set, so tests keep out of the real one, else `~/Library/Caches/mddog`.
+/// The cache root: MDDOG_CACHE_DIR overrides both platforms. macOS uses ~/Library/Caches/mddog;
+/// Linux uses an absolute XDG_CACHE_HOME/mddog, else ~/.cache/mddog.
 fn cache_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os("MDDOG_CACHE_DIR").filter(|d| !d.is_empty()) {
-        return std::path::absolute(&dir).unwrap_or_else(|_| PathBuf::from(dir));
+    let override_dir = std::env::var_os("MDDOG_CACHE_DIR").map(PathBuf::from);
+    let xdg = std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from);
+    let home = std::env::var_os("HOME").filter(|h| !h.is_empty()).map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+    cache_root(override_dir.as_deref(), xdg.as_deref(), &home)
+}
+
+fn cache_root(override_dir: Option<&Path>, xdg: Option<&Path>, home: &Path) -> PathBuf {
+    if let Some(dir) = override_dir.filter(|d| !d.as_os_str().is_empty()) {
+        return std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf());
     }
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-    home.join("Library/Caches/mddog")
+    #[cfg(target_os = "macos")]
+    {
+        let _ = xdg;
+        home.join("Library/Caches/mddog")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        xdg.filter(|d| d.is_absolute()).map_or_else(|| home.join(".cache/mddog"), |d| d.join("mddog"))
+    }
 }
 
 /// The longest any response is kept; also the age at which `prune` removes a file.
@@ -420,6 +439,32 @@ fn fetch_in(agent: &ureq::Agent, url: &str, stop: &AtomicBool, disk: Option<Path
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cache_override_takes_precedence_and_resolves_relative_paths() {
+        let home = Path::new("/home/example");
+        let xdg = Some(Path::new("/xdg/cache"));
+        assert_eq!(cache_root(Some(Path::new("/override")), xdg, home), PathBuf::from("/override"));
+        assert_eq!(cache_root(Some(Path::new("relative-cache")), xdg, home), std::path::absolute("relative-cache").unwrap());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn linux_cache_uses_only_absolute_xdg_roots() {
+        let home = Path::new("/home/example");
+        let fallback = home.join(".cache/mddog");
+        assert_eq!(cache_root(None, Some(Path::new("/xdg/cache")), home), PathBuf::from("/xdg/cache/mddog"));
+        assert_eq!(cache_root(None, Some(Path::new("relative-cache")), home), fallback);
+        assert_eq!(cache_root(Some(Path::new("")), Some(Path::new("")), home), fallback);
+        assert_eq!(cache_root(None, None, home), fallback);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_cache_uses_library_without_an_override() {
+        let home = Path::new("/Users/example");
+        assert_eq!(cache_root(None, Some(Path::new("/xdg/cache")), home), home.join("Library/Caches/mddog"));
+    }
 
     #[test]
     fn remote_cache_drops_expired_then_oldest() {
